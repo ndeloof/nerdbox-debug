@@ -131,32 +131,6 @@ func (s *service) shutdown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// transformBindMounts transforms bind mounts
-func transformBindMounts(ctx context.Context, b *bundle.Bundle) error {
-	for i, m := range b.Spec.Mounts {
-		if m.Type == "bind" {
-			filename := filepath.Base(m.Source)
-			// Check that the bind is from a path with the bundle id
-			if filepath.Base(filepath.Dir(m.Source)) != filepath.Base(b.Path) {
-				log.G(ctx).WithFields(log.Fields{
-					"source": m.Source,
-					"name":   filename,
-				}).Debug("ignoring bind mount")
-				continue
-			}
-
-			buf, err := os.ReadFile(m.Source)
-			if err != nil {
-				return fmt.Errorf("failed to read mount file %q: %w", filename, err)
-			}
-			b.Spec.Mounts[i].Source = filename
-			b.AddExtraFile(filename, buf)
-		}
-	}
-
-	return nil
-}
-
 // Create a new initial process and container with the underlying OCI runtime
 func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *taskAPI.CreateTaskResponse, err error) {
 	log.G(ctx).WithFields(log.Fields{
@@ -183,11 +157,12 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 		nwpr      networksProvider
 		ctrNetCfg ctrNetConfig
 		resCfg    resourceConfig
+		bm        bindMounter
 	)
 	// Load the OCI bundle and apply transformers to get the bundle that'll be
 	// set up on the VM side.
 	b, err := bundle.Load(ctx, r.Bundle,
-		transformBindMounts,
+		bm.FromBundle,
 		nwpr.FromBundle,
 		ctrNetCfg.fromBundle,
 		resCfg.FromBundle,
@@ -220,14 +195,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 		return nil, errgrpc.ToGRPC(err)
 	}
 
-	nwOpts := nwpr.SandboxOptions()
-	initArgs := nwpr.InitArgs()
-
 	var opts []sandbox.Opt
 	opts = append(opts, sandbox.WithStateDir(vmState))
 	opts = append(opts, mountOpts...)
-	opts = append(opts, nwOpts...)
-	opts = append(opts, sandbox.WithInitArgs(initArgs...))
+
+	opts = append(opts, nwpr.SandboxOptions()...)
+	opts = append(opts, sandbox.WithInitArgs(nwpr.InitArgs()...))
+
+	opts = append(opts, bm.SandboxOpts()...)
+	opts = append(opts, sandbox.WithInitArgs(bm.InitArgs()...))
 
 	opts = append(opts, resCfg.SandboxOpts()...)
 
