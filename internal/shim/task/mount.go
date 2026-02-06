@@ -165,8 +165,8 @@ func transformMounts(ctx context.Context, id string, ms []*types.Mount) ([]*type
 		}
 	}
 
-	if len(addDisks) > 10 {
-		return nil, nil, fmt.Errorf("exceeded maximum virtio disk count: %d > 10: %w", len(addDisks), errdefs.ErrNotImplemented)
+	if len(addDisks) > 15 {
+		return nil, nil, fmt.Errorf("exceeded maximum virtio disk count: %d > 15: %w", len(addDisks), errdefs.ErrNotImplemented)
 	}
 
 	for _, do := range addDisks {
