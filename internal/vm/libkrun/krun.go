@@ -301,7 +301,7 @@ type libkrun struct {
 }
 
 func openLibkrun(path string) (_ *libkrun, _ uintptr, retErr error) {
-	f, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	f, err := dlOpen(path)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -315,7 +315,7 @@ func openLibkrun(path string) (_ *libkrun, _ uintptr, retErr error) {
 			}
 		}
 		if retErr != nil {
-			purego.Dlclose(f)
+			dlClose(f)
 		}
 	}()
 	var k libkrun
