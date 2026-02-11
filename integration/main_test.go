@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	exeDir := filepath.Dir(e)
 	paths := filepath.SplitList(os.Getenv("PATH"))
 	for _, p := range []string{
-		"../_output",
+		filepath.Join("..", "_output"),
 		".",
 	} {
 		absPath := filepath.Clean(filepath.Join(exeDir, p))
@@ -54,6 +54,10 @@ func TestMain(m *testing.M) {
 }
 
 func runWithVM(t *testing.T, runTest func(*testing.T, vm.Instance)) {
+	runWithVMOpts(t, nil, runTest)
+}
+
+func runWithVMOpts(t *testing.T, startOpts []vm.StartOpt, runTest func(*testing.T, vm.Instance)) {
 	for _, tc := range []struct {
 		name string
 		vmm  vm.Manager
@@ -76,7 +80,7 @@ func runWithVM(t *testing.T, runTest func(*testing.T, vm.Instance)) {
 				t.Fatal("Failed to create VM instance:", err)
 			}
 
-			if err := vm.Start(t.Context()); err != nil {
+			if err := vm.Start(t.Context(), startOpts...); err != nil {
 				t.Fatal("Failed to start VM instance:", err)
 			}
 
