@@ -1,3 +1,32 @@
+# INTERNAL FORK of nerdbox
+
+Please note the relevant branches in this fork:
+- `main` - Synced from upstream main, open all internal changes against this branch, PRs will not be merged 
+- `main-fork` - This branch - based on `main` with a script to cherry-pick commits from Github PRs
+- `main-internal` - Generated from running the cherry-pick script on `main-fork`
+
+The `contrib/cherry-pick-prs.sh` script in `main-fork` is used to cherry-pick commits directly from PRs on Github.
+This allows keeping the forked branch up to date without carrying patches or doing a mass rebase.
+Each PR can be rebased individually and removed once they are included in upstream `main`.
+
+## Procedure for adding a change to `main-internal`:
+1. Create a PR with the change you want to add
+  - If the change is private, open it again `main` in this repository
+  - If the change does not need to be privte, open it in the upstream repository
+2. Create a PR against (or just updated directly) `main-fork` to include your PR to `contrib/cherry-pick-prs.sh`
+3. Updated `main-internal` by running `contrib/cherry-pick-prs.sh` to cherry-pick all commits to branch.
+  - `git checkout main-internal`
+  - `git reset --hard main-fork`
+  - `./contrib/cherry-pick-prs.sh` - then sanity check the results
+  - `git push -f internal main-internal` - only push to internal fork, suggested to name remote to avoid confusion
+
+
+## Procedure for syncing from upstream `main`:
+1. `git pull upstream main`
+2. `git push internal main` - Check PRs for conflicts after update. Address conflicts directly in PRs.
+3. Rebase `main-fork` - `git checkout main-fork` then `git rebase main`
+4. Update `main-internal` - See step 3 in previous section
+
 # nerdbox: containerd runtime shim with VM isolation
 
 <picture>
