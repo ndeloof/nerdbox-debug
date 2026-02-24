@@ -295,6 +295,7 @@ CONFIG_PGTABLE_LEVELS=5
 CONFIG_ARCH_SUPPORTS_UPROBES=y
 CONFIG_ARCH_PROC_KCORE_TEXT=y
 CONFIG_BUILTIN_RETURN_ADDRESS_STRIPS_PAC=y
+CONFIG_HYPERVISOR_GUEST=y
 
 #
 # Platform selection
@@ -526,14 +527,17 @@ CONFIG_CMDLINE=""
 #
 # Power management options
 #
-# CONFIG_SUSPEND is not set
+CONFIG_SUSPEND=y
 # CONFIG_HIBERNATION is not set
-# CONFIG_PM is not set
+CONFIG_PM=y
 CONFIG_CPU_PM=y
 # CONFIG_ENERGY_MODEL is not set
 CONFIG_ARCH_HIBERNATION_POSSIBLE=y
 CONFIG_ARCH_SUSPEND_POSSIBLE=y
 # end of Power management options
+
+# ACPI support (needed for ACPI power-off via \_S5_ on Windows WHP)
+CONFIG_ACPI=y
 
 #
 # CPU Power Management
@@ -2311,6 +2315,11 @@ CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 #
 # Microsoft Hyper-V guest support
 #
+CONFIG_HYPERV=y
+# CONFIG_HYPERV_VTL_MODE is not set
+CONFIG_HYPERV_TIMER=y
+CONFIG_HYPERV_UTILS=y
+CONFIG_HYPERV_BALLOON=y
 # end of Microsoft Hyper-V guest support
 
 # CONFIG_GREYBUS is not set
