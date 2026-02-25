@@ -21,7 +21,7 @@ import (
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/streaming"
-	"github.com/containerd/containerd/v2/plugins"
+	cplugins "github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
@@ -29,51 +29,44 @@ import (
 
 func init() {
 	registry.Register(&plugin.Registration{
-		Type:     plugins.StreamingPlugin,
-		ID:       "manager",
-		Requires: []plugin.Type{},
+		Type: cplugins.StreamingPlugin,
+		ID:   "manager",
 		InitFn: func(ic *plugin.InitContext) (any, error) {
-			sm := &streamManager{
-				streams: map[string]*managedStream{},
-			}
-			return sm, nil
+			return &streamManager{
+				streams: make(map[string]*managedStream),
+			}, nil
 		},
 	})
 }
 
 type streamManager struct {
-	// streams maps name -> stream
+	mu      sync.Mutex
 	streams map[string]*managedStream
-
-	rwlock sync.RWMutex
 }
 
 func (sm *streamManager) Register(ctx context.Context, name string, stream streaming.Stream) error {
-	ms := &managedStream{
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if _, ok := sm.streams[name]; ok {
+		return errdefs.ErrAlreadyExists
+	}
+	sm.streams[name] = &managedStream{
 		Stream:  stream,
 		name:    name,
 		manager: sm,
 	}
-
-	sm.rwlock.Lock()
-	defer sm.rwlock.Unlock()
-	if _, ok := sm.streams[name]; ok {
-		return errdefs.ErrAlreadyExists
-	}
-	sm.streams[name] = ms
-
 	return nil
 }
 
 func (sm *streamManager) Get(ctx context.Context, name string) (streaming.Stream, error) {
-	sm.rwlock.RLock()
-	defer sm.rwlock.RUnlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 
 	stream, ok := sm.streams[name]
 	if !ok {
 		return nil, errdefs.ErrNotFound
 	}
-
 	return stream, nil
 }
 
@@ -85,9 +78,8 @@ type managedStream struct {
 }
 
 func (m *managedStream) Close() error {
-	m.manager.rwlock.Lock()
+	m.manager.mu.Lock()
 	delete(m.manager.streams, m.name)
-
-	m.manager.rwlock.Unlock()
+	m.manager.mu.Unlock()
 	return m.Stream.Close()
 }

@@ -161,8 +161,8 @@ func (s *service) removeStream(streamID string) {
 }
 
 // writeString writes a length-prefixed string to the connection.
-func writeString(conn net.Conn, s string) error {
-	b := []byte(s)
+func writeString(conn net.Conn, str string) error {
+	b := []byte(str)
 	if err := binary.Write(conn, binary.BigEndian, uint32(len(b))); err != nil {
 		return err
 	}
