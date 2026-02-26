@@ -24,6 +24,12 @@ ONI = "👹"
 ARCH = $(shell uname -m)
 OS = $(shell uname -s)
 
+# Map host arch to kernel arch convention (aarch64 -> arm64)
+ifeq ($(ARCH),aarch64)
+PLATFORM_ARCH = arm64
+else
+PLATFORM_ARCH = $(ARCH)
+endif
 LDFLAGS_x86_64_Linux = -lkrun
 LDFLAGS_aarch64_Linux = -lkrun
 LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib -lkrun
@@ -76,7 +82,7 @@ _output/vminitd: cmd/vminitd FORCE
 	@echo "$(WHALE) $@"
 	$(GO) build ${DEBUG_GO_GCFLAGS} ${GO_GCFLAGS} ${GO_BUILD_FLAGS} -o $@ ${GO_STATIC_LDFLAGS} ${GO_STATIC_TAGS}  ./$<
 
-_output/nerdbox-initrd: cmd/vminitd FORCE
+_output/nerdbox-initrd-$(PLATFORM_ARCH): cmd/vminitd FORCE
 	@echo "$(WHALE) $@"
 	$(BUILDX) bake initrd
 
@@ -100,7 +106,7 @@ ifeq ($(OS),Darwin)
 	codesign --entitlements src/run_vminitd.entitlements --force -s - $@
 endif
 
-_output/libkrun.so: FORCE
+_output/libkrun-$(PLATFORM_ARCH).so: FORCE
 	@echo "$(WHALE) $@"
 	$(BUILDX) bake libkrun
 
