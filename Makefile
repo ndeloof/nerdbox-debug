@@ -30,6 +30,8 @@ PLATFORM_ARCH = arm64
 else
 PLATFORM_ARCH = $(ARCH)
 endif
+KERNEL_ARCH ?= $(PLATFORM_ARCH)
+BAKE = $(BUILDX) bake --set '*.args.KERNEL_ARCH=$(KERNEL_ARCH)'
 LDFLAGS_x86_64_Linux = -lkrun
 LDFLAGS_aarch64_Linux = -lkrun
 LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib -lkrun
@@ -62,7 +64,7 @@ API_PACKAGES=$(shell ($(GO) list ${GO_TAGS} ./... | grep /api/ ))
 .PHONY: clean all validate lint generate protos check-protos check-api-descriptors proto-fmt shell
 
 all:
-	$(BUILDX) bake
+	$(BAKE)
 
 _output/containerd-shim-nerdbox-v1: cmd/containerd-shim-nerdbox-v1 FORCE
 	@echo "$(WHALE) $@"
@@ -79,9 +81,9 @@ _output/vminitd: cmd/vminitd FORCE
 	@echo "$(WHALE) $@"
 	$(GO) build ${DEBUG_GO_GCFLAGS} ${GO_GCFLAGS} ${GO_BUILD_FLAGS} -o $@ ${GO_STATIC_LDFLAGS} ${GO_STATIC_TAGS}  ./$<
 
-_output/nerdbox-initrd-$(PLATFORM_ARCH): cmd/vminitd FORCE
+_output/nerdbox-initrd-$(KERNEL_ARCH): cmd/vminitd FORCE
 	@echo "$(WHALE) $@"
-	$(BUILDX) bake initrd
+	$(BAKE) initrd
 
 _output/integration.test: integration FORCE
 	@echo "$(WHALE) $@"
@@ -103,9 +105,9 @@ ifeq ($(OS),Darwin)
 	codesign --entitlements src/run_vminitd.entitlements --force -s - $@
 endif
 
-_output/libkrun-$(PLATFORM_ARCH).so: FORCE
+_output/libkrun-$(KERNEL_ARCH).so: FORCE
 	@echo "$(WHALE) $@"
-	$(BUILDX) bake libkrun
+	$(BAKE) libkrun
 
 
 generate: protos
@@ -144,7 +146,7 @@ ifeq ($(KERNEL_ARCH),)
 	$(error KERNEL_ARCH is not set)
 endif
 	@echo "$(WHALE) $@"
-	@$(BUILDX) bake menuconfig
+	@$(BAKE) menuconfig
 	docker run --rm -it \
 		-v ./kernel:/config \
 		-w /usr/src/linux \
