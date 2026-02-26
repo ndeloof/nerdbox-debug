@@ -146,15 +146,69 @@ func (manager) Start(ctx context.Context, id string, opts shim.StartOpts) (_ shi
 	return params, nil
 }
 
+// bundlePath extracts the bundle path from the context. The shim framework
+// stores it as shim.Opts{BundlePath: ...} via the -bundle flag.
+func bundlePath(ctx context.Context) string {
+	if o, ok := ctx.Value(shim.OptsKey{}).(shim.Opts); ok {
+		return o.BundlePath
+	}
+	return ""
+}
+
+// removeRootfs removes the rootfs directory from the bundle so that
+// containerd's bundle cleanup doesn't attempt a bind filter unmount.
+// On Windows, Unmount calls bindfilter.RemoveFileBinding which fails with
+// ERROR_ACCESS_DENIED on directories that were never bind filter mounts
+// (nerdbox uses VM-based virtio block devices instead). Removing the
+// directory makes UnmountAll a no-op.
+func removeRootfs(ctx context.Context) {
+	if bp := bundlePath(ctx); bp != "" {
+		os.RemoveAll(filepath.Join(bp, "rootfs"))
+	}
+}
+
 func (manager) Stop(ctx context.Context, id string) (shim.StopStatus, error) {
-	p, err := os.ReadFile("shim.pid")
+	p, err := os.ReadFile(filepath.Join(bundlePath(ctx), "shim.pid"))
 	if err != nil {
+		if os.IsNotExist(err) {
+			// The shim already exited and cleaned up its pid file.
+			removeRootfs(ctx)
+			return shim.StopStatus{
+				ExitedAt:   time.Now(),
+				ExitStatus: 128 + 9,
+			}, nil
+		}
 		return shim.StopStatus{}, err
 	}
 	pid, err := strconv.Atoi(string(p))
 	if err != nil {
 		return shim.StopStatus{}, err
 	}
+
+	// Wait for the shim process to exit so that all file handles (from the
+	// VM, krun DLL, etc.) are fully released before containerd tries to
+	// clean up the bundle directory. Without this, the bundle rename/delete
+	// races with handle cleanup and fails with ERROR_SHARING_VIOLATION.
+	//
+	// Unlike Unix, os.Process.Wait works on any process on Windows, not
+	// just children. Go's FindProcess calls OpenProcess with SYNCHRONIZE
+	// access, and Wait calls WaitForSingleObject on the resulting handle:
+	//   https://github.com/golang/go/blob/go1.25.7/src/os/exec_windows.go#L84-L89
+	//   https://github.com/golang/go/blob/go1.25.7/src/os/exec_windows.go#L28
+	if proc, err := os.FindProcess(pid); err == nil {
+		done := make(chan struct{})
+		go func() {
+			proc.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	}
+
+	removeRootfs(ctx)
+
 	return shim.StopStatus{
 		ExitedAt:   time.Now(),
 		ExitStatus: 128 + 9, // 128 + SIGKILL
