@@ -222,7 +222,8 @@ ARG KERNEL_ARCH="x86_64"
 COPY --from=kernel-build /build/kernel /nerdbox-kernel-${KERNEL_ARCH}
 
 FROM scratch AS initrd
-COPY --from=initrd-build /build/nerdbox-initrd /nerdbox-initrd
+ARG KERNEL_ARCH="x86_64"
+COPY --from=initrd-build /build/nerdbox-initrd /nerdbox-initrd-${KERNEL_ARCH}
 
 FROM scratch AS shim
 COPY --from=shim-build /build/containerd-shim-nerdbox-v1 /containerd-shim-nerdbox-v1
@@ -244,7 +245,8 @@ RUN git clone --depth 1 --branch ${LIBKRUN_VERSION} https://github.com/container
     make BLK=1 NET=1
 
 FROM scratch AS libkrun
-COPY --from=libkrun-build /libkrun/target/release/libkrun.so /libkrun.so
+ARG KERNEL_ARCH="x86_64"
+COPY --from=libkrun-build /libkrun/target/release/libkrun.so /libkrun-${KERNEL_ARCH}.so
 
 FROM ${GOLANG_IMAGE} AS dev
 ARG CONTAINERD_VERSION=2.1.4
@@ -266,7 +268,8 @@ COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/
 
 COPY --from=dlv /go/bin/dlv /usr/local/bin/dlv
 
-COPY --from=libkrun /libkrun.so /usr/local/lib64/libkrun.so
+ARG KERNEL_ARCH="x86_64"
+COPY --from=libkrun /libkrun-${KERNEL_ARCH}.so /usr/local/lib64/libkrun-${KERNEL_ARCH}.so
 ENV LIBKRUN_PATH=/go/src/github.com/containerd/nerdbox/_output
 
 VOLUME /var/lib/containerd
