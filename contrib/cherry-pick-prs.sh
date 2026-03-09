@@ -63,7 +63,6 @@ cherry_pick_pr containerd/nerdbox 98 # updated containerd to wip-2.3 branch
 cherry_pick_pr containerd/nerdbox 78 # add flag vnet_hdr
 cherry_pick_pr containerd/nerdbox 81 # virtiofs support for bind mounts
 cherry_pick_pr docker/docker-next-nerdbox 19 # Previously merged commits that need a new PR
-cherry_pick_pr docker/docker-next-nerdbox 21 # disable VM debug logs
 cherry_pick_pr docker/docker-next-nerdbox 20 # Windows support
 cherry_pick_pr docker/docker-next-nerdbox 22 # Add Hyper-V enlightments to kernel
 
