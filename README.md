@@ -1,31 +1,18 @@
 # INTERNAL FORK of nerdbox
 
-Please note the relevant branches in this fork:
-- `main` - (also `main-upstream`) Synced from upstream main, open all internal changes against this branch, PRs will not be merged 
-- `main-fork` - This branch - based on `main` with a script to cherry-pick commits from Github PRs
-- `main-internal` - Generated from running the cherry-pick script on `main-fork`
+This branch is a development fork for testing changes not yet in upstream and providing a tag for testing as a dependency.
+It only contains list of PRs based on containerd/nerdbox main for generating a test branch.
 
-The `contrib/cherry-pick-prs.sh` script in `main-fork` is used to cherry-pick commits directly from PRs on Github.
-This allows keeping the forked branch up to date without carrying patches or doing a mass rebase.
-Each PR can be rebased individually and removed once they are included in upstream `main`.
+## Managing the PR list
 
-## Procedure for adding a change to `main-internal`:
-1. Create a PR with the change you want to add
-  - If the change is private, open it again `main` in this repository
-  - If the change does not need to be privte, open it in the upstream repository
-2. Create a PR against (or just updated directly) `main-fork` to include your PR to `contrib/cherry-pick-prs.sh`
-3. Updated `main-internal` by running `contrib/cherry-pick-prs.sh` to cherry-pick all commits to branch.
-  - `git checkout main-internal`
-  - `git reset --hard main-fork`
-  - `./contrib/cherry-pick-prs.sh` - then sanity check the results
-  - `git push -f internal main-internal` - only push to internal fork, suggested to name remote to avoid confusion
+PRs should be opened directly against `containerd/nerdbox` main or a fork of it (e.g. `docker/docker-next-nerdbox` or your personal fork).
 
+To add or remove a PR from the list, use the **Manage Fork PR List** GitHub Actions workflow
+([Actions > Manage Fork PR List > Run workflow](https://github.com/docker/docker-next-nerdbox/actions/workflows/fork-manage-prs.yml)).
 
-## Procedure for syncing from upstream `main`:
-1. `git pull upstream main`
-2. `git push internal main` - Check PRs for conflicts after update. Address conflicts directly in PRs.
-3. Rebase `main-fork` - `git checkout main-fork` then `git rebase main`
-4. Update `main-internal` - See step 3 in previous section
+To rebase `main-fork` onto the latest upstream main and automatically prune merged PRs from the list,
+use the **Rebase Fork** workflow
+([Actions > Rebase Fork > Run workflow](https://github.com/docker/docker-next-nerdbox/actions/workflows/fork-rebase.yml)).
 
 # nerdbox: containerd runtime shim with VM isolation
 
