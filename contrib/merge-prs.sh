@@ -21,11 +21,14 @@ if [ ! -f "$PR_LIST" ]; then
 fi
 
 ORIGINAL_HEAD=$(git rev-parse HEAD)
+ORIGINAL_BRANCH=$(git branch --show-current)
 
 cleanup_on_failure() {
     echo ""
     echo "Resetting branch to original commit..."
+    git rebase --abort 2>/dev/null || true
     git merge --abort 2>/dev/null || true
+    git checkout "$ORIGINAL_BRANCH" 2>/dev/null || true
     git reset --hard "$ORIGINAL_HEAD"
     echo "Branch reset to $(git log -1 --oneline "$ORIGINAL_HEAD")"
     # Clean up any leftover pr- branches
@@ -55,6 +58,26 @@ merge_pr() {
         echo "Error: Failed to fetch PR #$pr from $repo"
         cleanup_on_failure
     fi
+
+    # Rebase PR on top of current HEAD (advances as PRs are merged)
+    local current_head
+    current_head=$(git rev-parse HEAD)
+    local upstream
+    upstream=$(git merge-base "$current_head" "$pr_branch")
+    echo "Rebasing PR #$pr on top of $current_head..."
+    git stash -q 2>/dev/null || true
+    if ! git rebase --onto "$current_head" "$upstream" "$pr_branch"; then
+        echo ""
+        echo "Error: Rebase failed for $repo#$pr"
+        git rebase --abort 2>/dev/null || true
+        git checkout "$ORIGINAL_BRANCH" 2>/dev/null || true
+        git stash pop -q 2>/dev/null || true
+        git branch -D "$pr_branch" 2>/dev/null || true
+        cleanup_on_failure
+    fi
+    # Return to original branch after rebase (rebase checks out pr_branch)
+    git checkout "$ORIGINAL_BRANCH"
+    git stash pop -q 2>/dev/null || true
 
     # Show commits for reference
     local merge_base
