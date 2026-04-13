@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 env:
   TAG_PREFIX: "v0.1.0-alpha.internal."
