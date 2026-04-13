@@ -7,3 +7,4 @@ docker/docker-next-nerdbox 22 Add Hyper-V enlightments to kernel
 docker/docker-next-nerdbox 25 Windows container restart
 docker/docker-next-nerdbox 26 Arch suffix for build artifacts
 containerd/nerdbox 155 Use new shim bootstrap protocol
+containerd/nerdbox 154 Fix race in closing transfer streams
