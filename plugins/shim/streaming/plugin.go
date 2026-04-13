@@ -101,11 +101,12 @@ func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_Strea
 	// TTRPC -> VM: receive typeurl.Any from containerd, frame and write to VM
 	go func() {
 		err := bridgeTTRPCToVM(srv, vmConn)
-		// Half-close the write side so the VM sees EOF on its reads
-		// while still allowing data to flow back from VM -> TTRPC.
-		if cw, ok := vmConn.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
+		// Send a zero-length frame as an application-level EOF marker
+		// so the VM sees EOF on its reads. We avoid CloseWrite()
+		// because the vsock proxy turns transport-level shutdown into
+		// a bidirectional SHUTDOWN, which kills the reverse direction
+		// (VM -> TTRPC) and can cause the peer to lose in-flight data.
+		binary.Write(vmConn, binary.BigEndian, uint32(0))
 		done <- err
 	}()
 
@@ -167,6 +168,10 @@ func bridgeVMToTTRPC(conn io.Reader, srv streamapi.TTRPCStreaming_StreamServer) 
 		var length uint32
 		if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
 			return err
+		}
+		// A zero-length frame is an application-level EOF marker.
+		if length == 0 {
+			return nil
 		}
 		data := make([]byte, length)
 		if _, err := io.ReadFull(conn, data); err != nil {
