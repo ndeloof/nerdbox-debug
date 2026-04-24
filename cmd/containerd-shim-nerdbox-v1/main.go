@@ -21,7 +21,7 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/shim"
 
-	"github.com/containerd/nerdbox/internal/shim/manager"
+	"github.com/containerd/nerdbox/pkg/shim/manager"
 
 	_ "github.com/containerd/nerdbox/plugins/shim/sandbox"
 	_ "github.com/containerd/nerdbox/plugins/shim/streaming"
@@ -31,5 +31,5 @@ import (
 )
 
 func main() {
-	shim.RunShim(context.Background(), manager.NewShimManager("io.containerd.nerdbox.v1"))
+	shim.RunShim(context.Background(), manager.New("io.containerd.nerdbox.v1"))
 }
