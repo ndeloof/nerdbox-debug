@@ -26,9 +26,11 @@ import (
 	"github.com/containerd/containerd/v2/pkg/shim"
 )
 
-// NewShimManager returns an implementation of the shim manager
-// using run_vminitd
-func NewShimManager(name string) shim.Shim {
+// New returns a shim manager implementation that launches the nerdbox shim
+// process. The name is the runtime identifier reported to containerd (for
+// example "io.containerd.nerdbox.v1"). External callers building variants
+// of the nerdbox shim use this to assemble their own main package.
+func New(name string) shim.Shim {
 	return &manager{
 		name: name,
 	}
