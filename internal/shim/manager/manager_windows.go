@@ -59,6 +59,33 @@ func newCommand(ctx context.Context, id, containerdAddress, containerdTTRPCAddre
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=4")
 	cmd.Env = append(cmd.Env, "OTEL_SERVICE_NAME=containerd-shim-"+id)
+
+	// Explicitly forward verbose-logging env vars so they survive any
+	// containerd/runtime layer that might scrub the manager's env.
+	// SHIM_LOG_DIR is read by init_tracing in nerdbox-shim/src/daemon.rs;
+	// RUST_LOG and SAILOR_FUSE_TRACE_DIR are read by the embedded sailor
+	// VMM. Empty values are still forwarded so the child process behaves
+	// identically when the manager has them unset.
+	for _, key := range []string{"RUST_LOG", "SHIM_LOG_DIR", "SAILOR_FUSE_TRACE_DIR"} {
+		if v, ok := os.LookupEnv(key); ok {
+			cmd.Env = append(cmd.Env, key+"="+v)
+		}
+	}
+
+	// Diagnostic: write the env vars the manager observed at this point
+	// to a fixed path so CI can determine where propagation breaks.
+	if dumpDir, ok := os.LookupEnv("SHIM_LOG_DIR"); ok && filepath.IsAbs(dumpDir) {
+		dump := fmt.Sprintf(
+			"RUST_LOG=%q\nSHIM_LOG_DIR=%q\nSAILOR_FUSE_TRACE_DIR=%q\nOTEL_EXPORTER_OTLP_ENDPOINT=%q\nid=%s\nns=%s\n",
+			os.Getenv("RUST_LOG"),
+			os.Getenv("SHIM_LOG_DIR"),
+			os.Getenv("SAILOR_FUSE_TRACE_DIR"),
+			os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+			id,
+			ns,
+		)
+		_ = os.WriteFile(filepath.Join(dumpDir, fmt.Sprintf("manager-env-%s.txt", id)), []byte(dump), 0o644)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 	}
