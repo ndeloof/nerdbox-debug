@@ -53,15 +53,25 @@ func newCommand(ctx context.Context, id, containerdAddress, containerdTTRPCAddre
 		"-id", id,
 		"-address", containerdAddress,
 	}
-	if debug {
-		args = append(args, "-debug")
-	}
+	// Force -debug for CI debug iteration so log.SetLevel('debug') is called
+	// in the shim and progress logs are emitted.
+	args = append(args, "-debug")
+	_ = debug
 	cmd := exec.Command(self, args...)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=4")
 	cmd.Env = append(cmd.Env, "OTEL_SERVICE_NAME=containerd-shim-"+id)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+	// Capture shim stderr/stdout to a file so the kernel console output
+	// (which goes to the shim's stderr by default) is preserved for CI dump.
+	if dumpDir, ok := os.LookupEnv("SHIM_LOG_DIR"); ok && filepath.IsAbs(dumpDir) {
+		stderrPath := filepath.Join(dumpDir, fmt.Sprintf("shim-stderr-%s.log", id))
+		if f, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			cmd.Stderr = f
+			cmd.Stdout = f
+		}
 	}
 	return cmd, nil
 }

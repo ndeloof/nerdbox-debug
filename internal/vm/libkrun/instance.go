@@ -42,7 +42,9 @@ var vmStartTimeout = 15 * time.Second
 func init() {
 	if runtime.GOOS == "windows" {
 		// Windows WHP hypervisor has higher startup overhead than macOS/Linux.
-		vmStartTimeout = 30 * time.Second
+		// Bumped from 30s to 90s during CI debug to see if a slow boot eventually
+		// produces useful kernel/init output captured in the shim stderr.
+		vmStartTimeout = 90 * time.Second
 	}
 }
 
