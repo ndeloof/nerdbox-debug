@@ -20,8 +20,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -90,21 +94,33 @@ func (f *fakeStreamServer) Recv() (*anypb.Any, error) {
 	}
 }
 
+// SendMsg implements ttrpc.StreamServer. It is only invoked when a
+// caller goes through the generic ttrpc.StreamServer interface; the
+// streaming wrapper always passes *anypb.Any here. We assert that
+// explicitly and return a clear error on misuse instead of panicking.
 func (f *fakeStreamServer) SendMsg(m interface{}) error {
-	return f.Send(m.(*anypb.Any))
+	a, ok := m.(*anypb.Any)
+	if !ok {
+		return fmt.Errorf("fakeStreamServer.SendMsg: expected *anypb.Any, got %T", m)
+	}
+	return f.Send(a)
 }
 
+// RecvMsg implements ttrpc.StreamServer. The streaming wrapper always
+// passes a freshly-allocated *anypb.Any; we copy fields into it
+// directly rather than going through proto.Merge, which would silently
+// misbehave on a type mismatch.
 func (f *fakeStreamServer) RecvMsg(m interface{}) error {
+	dst, ok := m.(*anypb.Any)
+	if !ok {
+		return fmt.Errorf("fakeStreamServer.RecvMsg: expected *anypb.Any, got %T", m)
+	}
 	a, err := f.Recv()
 	if err != nil {
 		return err
 	}
-	dst, ok := m.(proto.Message)
-	if !ok {
-		return io.ErrUnexpectedEOF
-	}
-	proto.Reset(dst)
-	proto.Merge(dst, a)
+	dst.TypeUrl = a.TypeUrl
+	dst.Value = a.Value
 	return nil
 }
 
@@ -170,8 +186,7 @@ func startStream(t *testing.T, ctx context.Context, id string) (srv *fakeStreamS
 // closes the server stream and the client unblocks; without the fix the
 // handler waits for both bridge directions and hangs indefinitely.
 func TestStreamReturnsAfterVMEOFWithoutClientClose(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	_, vmSide, done := startStream(t, ctx, "stream-eof")
 
@@ -198,8 +213,7 @@ func TestStreamReturnsAfterVMEOFWithoutClientClose(t *testing.T) {
 // handler must still wait for the VM->client direction to drain before
 // returning so no in-flight server replies are lost.
 func TestStreamReturnsWhenVMEOFAfterClientClose(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	srv, vmSide, done := startStream(t, ctx, "stream-client-close")
 
@@ -241,8 +255,7 @@ func TestStreamReturnsWhenVMEOFAfterClientClose(t *testing.T) {
 // moves through the bridge correctly so the regression coverage above
 // is not vacuous.
 func TestStreamForwardsBothDirections(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	srv, vmSide, done := startStream(t, ctx, "stream-bidi")
 
@@ -309,5 +322,198 @@ func TestStreamForwardsBothDirections(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stream handler did not return after VM EOF")
+	}
+}
+
+// fakeMultiSandbox returns a different net.Conn from StartStream for
+// each registered stream ID, allowing a single ttrpc connection to host
+// multiple streams with different VM-side behavior in the same test.
+type fakeMultiSandbox struct {
+	mu    sync.Mutex
+	conns map[string]net.Conn
+}
+
+func (s *fakeMultiSandbox) Start(context.Context, ...sandbox.Opt) error {
+	return errdefs.ErrNotImplemented
+}
+func (s *fakeMultiSandbox) Stop(context.Context) error     { return errdefs.ErrNotImplemented }
+func (s *fakeMultiSandbox) Client() (*ttrpc.Client, error) { return nil, errdefs.ErrNotImplemented }
+func (s *fakeMultiSandbox) StartStream(_ context.Context, id string) (net.Conn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conn, ok := s.conns[id]
+	if !ok {
+		return nil, fmt.Errorf("stream %q: %w", id, errdefs.ErrNotFound)
+	}
+	delete(s.conns, id)
+	return conn, nil
+}
+
+// TestSlowStreamDoesNotBlockOtherStreams demonstrates the connection
+// receive-loop deadlock fixed by the ttrpc upgrade in go.mod (v1.2.8 ->
+// v1.2.9-...).
+//
+// In ttrpc v1.2.8 each server-side streamHandler has an unbuffered-ish
+// recv channel (cap=5) and `streamHandler.data` blocks indefinitely
+// when the channel is full. Because that function is called by the
+// single per-connection receive goroutine in server.go, a stream whose
+// handler is not draining its recv channel will block delivery for
+// every other stream and unary RPC sharing the same client connection.
+//
+// In ttrpc v1.2.9 the buffer size is 64 for client-streaming RPCs and
+// `data` falls back to a 1-second wait followed by ErrStreamFull, which
+// keeps the receive loop moving even when one stream stalls.
+//
+// To reproduce: open a stream whose VM-side connection is wedged so
+// the server's bridge consumes one message and then blocks on Write
+// forever. Burst >65 messages on the wire to fill the recv buffer
+// past the v1.2.9 cap, then open a second stream on the same client
+// and try to complete its init handshake. With the old ttrpc the
+// second stream's create+init request never reaches the handler;
+// with the new ttrpc the slow stream's surplus messages return
+// ErrStreamFull after ~1s and the second stream proceeds normally.
+func TestSlowStreamDoesNotBlockOtherStreams(t *testing.T) {
+	// VM-side conn for the "slow" stream: a synchronous net.Pipe whose
+	// VM end is never read, so the bridge's first Write blocks forever
+	// and subsequent client messages pile up in the stream's recv
+	// channel until it overflows.
+	slowShim, slowVM := net.Pipe()
+	t.Cleanup(func() {
+		slowShim.Close()
+		slowVM.Close()
+	})
+
+	// VM-side conn for the "fast" stream: drained eagerly so the
+	// handler can serve StreamInit and ack normally without back
+	// pressure.
+	fastShim, fastVM := net.Pipe()
+	t.Cleanup(func() {
+		fastShim.Close()
+		fastVM.Close()
+	})
+	go io.Copy(io.Discard, fastVM)
+
+	sb := &fakeMultiSandbox{
+		conns: map[string]net.Conn{
+			"slow": slowShim,
+			"fast": fastShim,
+		},
+	}
+
+	// Real ttrpc server with the streaming service registered.
+	server, err := ttrpc.NewServer()
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	streamapi.RegisterTTRPCStreamingService(server, &service{sb: sb})
+
+	// Stay under the AF_UNIX 104-byte sun_path limit on darwin:
+	// t.TempDir() on macOS lives under /var/folders/.../T/<TestName>/NNN/
+	// which alone exceeds 90 characters, so "<tmpdir>/ttrpc.sock"
+	// bind() with EINVAL there. Anchor the socket under /tmp instead
+	// (works on darwin and linux) and clean it up explicitly.
+	sockDir, err := os.MkdirTemp("/tmp", "nb-stream")
+	if err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "s")
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serveCtx, serveCancel := context.WithCancel(context.Background())
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		if err := server.Serve(serveCtx, listener); err != nil &&
+			!errors.Is(err, ttrpc.ErrServerClosed) {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		// Closing the slow pipes first lets any blocked bridge writes
+		// return so the streamHandler can finish and the receive loop
+		// unblocks before we tear down the server.
+		slowShim.Close()
+		slowVM.Close()
+		server.Close()
+		serveCancel()
+		<-serveDone
+	})
+
+	// ttrpc client over the same unix socket.
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	client := ttrpc.NewClient(conn)
+	t.Cleanup(func() { client.Close() })
+
+	streamClient := streamapi.NewTTRPCStreamingClient(client)
+
+	ctx := t.Context()
+
+	// 1) Open the slow stream and complete its init handshake. The
+	//    server's handler returns the slow shimSide conn from
+	//    StartStream and starts its bridge goroutines; the bridge
+	//    consumes the first data message we send below and then
+	//    blocks forever on Write to slowShim.
+	slow, err := streamClient.Stream(ctx)
+	if err != nil {
+		t.Fatalf("open slow stream: %v", err)
+	}
+	if err := slow.Send(streamInitAny(t, "slow")); err != nil {
+		t.Fatalf("send slow init: %v", err)
+	}
+	if _, err := slow.Recv(); err != nil {
+		t.Fatalf("slow ack: %v", err)
+	}
+
+	// 2) Burst messages on the slow stream until the server-side recv
+	//    buffer overflows. With ttrpc v1.2.8 the buffer is 5, so any
+	//    one of these will eventually wedge the connection's receive
+	//    loop. With v1.2.9 the buffer is 64; we send a few more to
+	//    push past it and trigger the 1-second ErrStreamFull fallback.
+	//    66 = 1 consumed by the bridge + 64 buffered + 1 to overflow.
+	payload := &anypb.Any{TypeUrl: "test/x", Value: bytes.Repeat([]byte{0xff}, 16)}
+	for i := 0; i < 66; i++ {
+		if err := slow.Send(payload); err != nil {
+			// v1.2.9+ closes the stream with a status error after the
+			// buffer-full event; further Sends will fail. By that
+			// point the deadlock has already been provoked.
+			break
+		}
+	}
+
+	// 3) Open a second stream on the same client and complete its
+	//    init handshake. With ttrpc v1.2.8 the create+init messages
+	//    sit on the wire because the server's connection-wide receive
+	//    goroutine is blocked delivering data to the slow stream's
+	//    full recv buffer. With v1.2.9 the slow stream's surplus
+	//    messages time out after ~1s with ErrStreamFull and the
+	//    receive loop continues to process this stream.
+	fast, err := streamClient.Stream(ctx)
+	if err != nil {
+		t.Fatalf("open fast stream: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		if err := fast.Send(streamInitAny(t, "fast")); err != nil {
+			done <- fmt.Errorf("send fast init: %w", err)
+			return
+		}
+		_, err := fast.Recv()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("fast stream init failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fast stream init deadlocked: the slow stream's full recv buffer is blocking the connection's shared receive goroutine, so the fast stream's create+init request never reaches its handler. This is the deadlock fixed by upgrading ttrpc to v1.2.9 (per-stream recv buffer + ErrStreamFull fallback)")
 	}
 }
