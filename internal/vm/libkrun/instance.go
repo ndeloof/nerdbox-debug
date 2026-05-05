@@ -433,9 +433,16 @@ func (v *vmInstance) Client() *ttrpc.Client {
 }
 
 func (v *vmInstance) Shutdown(ctx context.Context) error {
+	// Diagnostic (docker/sandboxes#2529): record entry into vmInstance
+	// Shutdown so we can pinpoint the moment libkrun is asked to tear
+	// down the VM (which is what produces the guest-side vsock SHUTDOWN
+	// packet on port 1026 observed in CI).
+	log.G(ctx).Info("shim-diag: libkrun vmInstance.Shutdown invoked")
+	defer log.G(ctx).Info("shim-diag: libkrun vmInstance.Shutdown returned")
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.handler == 0 {
+		log.G(ctx).Info("shim-diag: libkrun vmInstance.Shutdown: already closed")
 		return fmt.Errorf("libkrun already closed")
 	}
 	// Stop the VM and wait for all threads (vCPU, virtio workers) to exit
@@ -444,12 +451,14 @@ func (v *vmInstance) Shutdown(ctx context.Context) error {
 	// the code out from under running threads and leaves file handles open,
 	// preventing containerd from cleaning up the bundle directory.
 	if v.vmc != nil {
+		log.G(ctx).Info("shim-diag: libkrun vmInstance.Shutdown: calling krun_free_ctx")
 		if err := v.vmc.Shutdown(); err != nil {
 			log.G(ctx).WithError(err).Warn("krun_free_ctx failed during shutdown")
 		}
 	}
 	err := dlClose(v.handler)
 	if err != nil {
+		log.G(ctx).WithError(err).Info("shim-diag: libkrun vmInstance.Shutdown: dlClose failed")
 		return err
 	}
 	v.handler = 0 // Mark as closed

@@ -21,9 +21,11 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime/debug"
 	"sync"
 
 	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	"github.com/containerd/nerdbox/internal/shim/sandbox"
 	"github.com/containerd/nerdbox/internal/vm"
 	"github.com/containerd/ttrpc"
@@ -114,18 +116,26 @@ func (s *localsandbox) Start(ctx context.Context, opts ...sandbox.Opt) error {
 }
 
 func (s *localsandbox) Stop(ctx context.Context) error {
+	// Diagnostic (docker/sandboxes#2529): record exact moment we ask
+	// libkrun to power off the VM, with caller stack so we can attribute
+	// "VM stopped at ~18-20s" to the right code path (RPC Shutdown vs
+	// shutdown callback vs explicit cleanup).
+	log.G(ctx).WithField("stack", string(debug.Stack())).Info("shim-diag: localsandbox.Stop invoked")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.instance == nil {
+		log.G(ctx).Info("shim-diag: localsandbox.Stop: instance already nil")
 		return errdefs.ErrFailedPrecondition
 	}
 
 	if err := s.instance.Shutdown(ctx); err != nil {
+		log.G(ctx).WithError(err).Info("shim-diag: localsandbox.Stop: instance.Shutdown returned error")
 		return err
 	}
 
 	s.instance = nil
+	log.G(ctx).Info("shim-diag: localsandbox.Stop: instance shutdown completed")
 	return nil
 }
 

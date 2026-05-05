@@ -111,6 +111,11 @@ func (s *service) RegisterTTRPC(server *ttrpc.Server) error {
 }
 
 func (s *service) shutdown(ctx context.Context) error {
+	// Diagnostic (docker/sandboxes#2529): record entry into the shutdown
+	// callback so we can timestamp when the VM stop is initiated relative
+	// to the Shutdown ttrpc call.
+	log.G(ctx).WithField("containers", len(s.containers)).Info("shim-diag: shutdown-callback-start")
+	defer log.G(ctx).Info("shim-diag: shutdown-callback-end")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var errs []error
@@ -297,6 +302,25 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 				}
 				return
 			}
+			// Diagnostic (docker/sandboxes#2529): log every VM event as it
+			// arrives so we can correlate the ~18-20s shim Shutdown with what
+			// the guest reported just before. In particular, a TaskExit at
+			// ~18-20s means the dockerd-in-sandbox init died inside the VM
+			// (and containerd subsequently called Shutdown on us); absence of
+			// any pre-shutdown event means the shim was killed via another
+			// path (e.g. ttrpc connection drop, OS-level signal, etc).
+			topic := ""
+			value := ""
+			if ev != nil {
+				topic = ev.Topic
+				if ev.Event != nil {
+					value = ev.Event.TypeUrl
+				}
+			}
+			log.G(ctx).WithFields(log.Fields{
+				"topic": topic,
+				"type":  value,
+			}).Info("shim-diag: vm-event-received")
 			s.send(ev)
 		}
 	}(ns)
@@ -663,6 +687,15 @@ func (s *service) Connect(ctx context.Context, r *taskAPI.ConnectRequest) (*task
 }
 
 func (s *service) Shutdown(ctx context.Context, r *taskAPI.ShutdownRequest) (*ptypes.Empty, error) {
+	// Diagnostic (docker/sandboxes#2529): include enough context to
+	// identify whether containerd is calling Shutdown right after a
+	// TaskExit (clean container teardown) or out-of-band (e.g. health
+	// check failure, ttrpc closed, etc).
+	log.G(ctx).WithFields(log.Fields{
+		"id":     r.ID,
+		"stack":  string(debug.Stack()),
+		"caller": "shim-shutdown-rpc",
+	}).Info("shim-diag: Shutdown ttrpc method invoked")
 	log.G(ctx).WithFields(log.Fields{"id": r.ID}).Info("shutdown")
 
 	// TODO: Should we forward this to VM?
