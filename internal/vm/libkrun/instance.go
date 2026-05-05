@@ -122,7 +122,17 @@ func (*vmManager) NewInstance(ctx context.Context, state string) (vm.Instance, e
 
 	var ret int32
 	setLogging.Do(func() {
-		ret = lib.InitLog(os.Stderr.Fd(), uint32(warnLevel), 0, 0)
+		// Diag fork: when RUST_LOG is set (CI debug builds), pass trace
+		// level so libkrun's `log::set_max_level` does not cap below the
+		// env_logger filter parsed from RUST_LOG. The default `warnLevel`
+		// silently drops every `log::debug!`/`info!`/`trace!` from sailor
+		// before env_logger can emit it, hiding e.g. virtio-net per-flow
+		// peer-close diagnostics. See docker/sandboxes#2529.
+		level := warnLevel
+		if _, ok := os.LookupEnv("RUST_LOG"); ok {
+			level = traceLevel
+		}
+		ret = lib.InitLog(os.Stderr.Fd(), uint32(level), 0, 0)
 	})
 	if ret != 0 {
 		return nil, fmt.Errorf("krun_init_log failed: %d", ret)
