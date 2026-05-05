@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -110,6 +111,13 @@ func (s *service) RegisterTTRPC(server *ttrpc.Server) error {
 }
 
 func (s *service) shutdown(ctx context.Context) error {
+	// Diag (sandboxes#2529): catch every entry into the shim's shutdown
+	// callback. This is registered with shutdown.Service.RegisterCallback
+	// in NewTaskService and fires on RPC Shutdown, signal reaper, or any
+	// other path that calls sd.Shutdown().
+	log.G(ctx).WithFields(log.Fields{
+		"stack": string(debug.Stack()),
+	}).Info("diag-shim-shutdown-callback-enter")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var errs []error
@@ -128,6 +136,14 @@ func (s *service) shutdown(ctx context.Context) error {
 	}
 
 	if s.sb != nil {
+		// Diag (sandboxes#2529): record the call site that is about to
+		// tear down the VM via libkrun. The stack trace identifies which
+		// goroutine triggered shim shutdown — RPC Shutdown handler, signal
+		// reaper, or some unexpected idle/timer path.
+		log.G(ctx).WithFields(log.Fields{
+			"reason": "service.shutdown -> sb.Stop",
+			"stack":  string(debug.Stack()),
+		}).Info("diag-shim-vm-stop-call")
 		if err := s.sb.Stop(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("sandbox shutdown: %w", err))
 		}
@@ -285,6 +301,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 				} else {
 					log.G(ctx).WithError(err).Error("vm event stream error")
 				}
+				// Diag (sandboxes#2529): log the underlying TTRPC error
+				// (and its type) so we can distinguish vminitd graceful
+				// shutdown from a peer-close / pipe-broken / read-deadline
+				// scenario triggered from the shim's TTRPC client.
+				log.G(ctx).WithError(err).WithFields(log.Fields{
+					"err_type": fmt.Sprintf("%T", err),
+				}).Info("diag-ttrpc-client-error")
 				return
 			}
 			s.send(ev)
@@ -654,6 +677,13 @@ func (s *service) Connect(ctx context.Context, r *taskAPI.ConnectRequest) (*task
 
 func (s *service) Shutdown(ctx context.Context, r *taskAPI.ShutdownRequest) (*ptypes.Empty, error) {
 	log.G(ctx).WithFields(log.Fields{"id": r.ID}).Info("shutdown")
+	// Diag (sandboxes#2529): record the goroutine that drove this RPC so we
+	// can distinguish containerd-initiated Shutdown from a hypothetical
+	// idle/keepalive trigger inside the shim.
+	log.G(ctx).WithFields(log.Fields{
+		"id":    r.ID,
+		"stack": string(debug.Stack()),
+	}).Info("diag-shim-shutdown-rpc")
 
 	// TODO: Should we forward this to VM?
 	// tc := taskAPI.NewTTRPCTaskClient(s.vm.Client())

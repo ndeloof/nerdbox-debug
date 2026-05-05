@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/streaming"
 	"github.com/containerd/containerd/v2/pkg/shutdown"
@@ -68,6 +70,14 @@ func init() {
 			if err != nil {
 				return nil, fmt.Errorf("failed to listen on vsock port %d with context id %d: %w", config.Port, config.ContextID, err)
 			}
+			// Diag (sandboxes#2529): vsock streaming listener is up. This is
+			// the listener that, when closed, causes the kernel to emit
+			// op=Shutdown src=1026 dst=1024 packets seen on the host.
+			log.L.WithFields(map[string]any{
+				"port":       config.Port,
+				"context_id": config.ContextID,
+				"local":      l.Addr().String(),
+			}).Info("diag-vsock-listener-open")
 
 			s := &service{
 				l:       l,
@@ -91,6 +101,15 @@ type service struct {
 }
 
 func (s *service) Shutdown(ctx context.Context) error {
+	// Diag (sandboxes#2529): vminitd is closing the vsock 1026 listener.
+	// This is the prime suspect for the op=Shutdown packets observed.
+	// Capture the stack so we know which shutdown.Service path triggered us.
+	log.G(ctx).WithFields(log.Fields{
+		"port":         1026,
+		"open_streams": len(s.streams),
+		"stack":        string(debug.Stack()),
+	}).Info("diag-vsock-listener-closed")
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -118,8 +137,24 @@ func (s *service) Run() {
 	for {
 		conn, err := s.l.Accept()
 		if err != nil {
+			// Diag (sandboxes#2529): listener accept loop exiting; record
+			// the underlying error so we can tell whether it was an explicit
+			// Close(), a kernel-level reset, or something else.
+			log.L.WithError(err).WithFields(map[string]any{
+				"port":     1026,
+				"err_type": fmt.Sprintf("%T", err),
+			}).Info("diag-vsock-listener-accept-exit")
 			return // Listener closed
 		}
+		acceptedAt := time.Now()
+		// Diag (sandboxes#2529): per-connection accepted log on the
+		// vminitd-side listener. Wrap the conn so its Close() is logged too.
+		log.L.WithFields(map[string]any{
+			"port":   1026,
+			"remote": conn.RemoteAddr().String(),
+			"local":  conn.LocalAddr().String(),
+		}).Info("diag-vsock-stream-accepted")
+		conn = &diagAcceptedConn{Conn: conn, openedAt: acceptedAt}
 
 		// Read length-prefixed stream ID
 		var idLen uint32
@@ -135,6 +170,9 @@ func (s *service) Run() {
 			continue
 		}
 		streamID := string(idBytes)
+		if dac, ok := conn.(*diagAcceptedConn); ok {
+			dac.streamID = streamID
+		}
 
 		s.mu.Lock()
 		if _, ok := s.streams[streamID]; ok {
@@ -156,6 +194,30 @@ func (s *service) Run() {
 			continue
 		}
 	}
+}
+
+// diagAcceptedConn wraps a vminitd-side accepted vsock conn so we can log
+// when each per-stream connection closes. Diag (sandboxes#2529): combined
+// with diag-vsock-stream-accepted, this lets us correlate stream lifetime
+// with the op=Shutdown packets observed by the host.
+type diagAcceptedConn struct {
+	net.Conn
+	streamID string
+	openedAt time.Time
+	once     sync.Once
+}
+
+func (c *diagAcceptedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() {
+		log.L.WithFields(map[string]any{
+			"port":        1026,
+			"stream":      c.streamID,
+			"remote":      c.Conn.RemoteAddr().String(),
+			"duration_ms": time.Since(c.openedAt).Milliseconds(),
+		}).Info("diag-vsock-stream-closed")
+	})
+	return err
 }
 
 func (s *service) removeStream(streamID string) {

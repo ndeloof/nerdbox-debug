@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -309,6 +310,13 @@ func (v *vmInstance) Start(ctx context.Context, opts ...vm.StartOpt) (err error)
 	if err := v.vmc.AddVSockPort(1026, v.streamPath); err != nil {
 		return fmt.Errorf("failed to add vsock port: %w", err)
 	}
+	// Diag (sandboxes#2529): vsock port 1026 stream listener bridge is now
+	// registered with libkrun. The host side listens on streamPath; the guest
+	// side listens on vsock CID=3 port=1026 in vminitd's streaming plugin.
+	log.G(ctx).WithFields(log.Fields{
+		"port":        1026,
+		"stream_path": v.streamPath,
+	}).Info("diag-vsock-listener-open")
 
 	preVMStart := time.Now()
 
@@ -371,11 +379,29 @@ func (v *vmInstance) Start(ctx context.Context, opts ...vm.StartOpt) (err error)
 		"t_total":  time.Since(startedAt),
 	}).Info("VM connection established")
 
-	v.shutdownCallbacks = append(v.shutdownCallbacks, func(context.Context) error {
+	v.shutdownCallbacks = append(v.shutdownCallbacks, func(ctx context.Context) error {
+		// Diag (sandboxes#2529): TTRPC backing conn close path. Log who
+		// triggered it (stack trace) so we can correlate with the guest
+		// vsock op=Shutdown packet seen from the kernel.
+		log.G(ctx).WithFields(log.Fields{
+			"reason": "shutdown-callback",
+			"stack":  string(debug.Stack()),
+		}).Info("diag-ttrpc-client-close")
 		return conn.Close()
 	})
 
-	v.client = ttrpc.NewClient(conn)
+	// Diag (sandboxes#2529): TTRPC client to vminitd RPC port 1025 created.
+	v.client = ttrpc.NewClient(conn,
+		ttrpc.WithOnClose(func() {
+			log.G(ctx).WithFields(log.Fields{
+				"reason": "ttrpc-onclose",
+			}).Info("diag-ttrpc-client-close")
+		}),
+	)
+	log.G(ctx).WithFields(log.Fields{
+		"port":   1025,
+		"remote": conn.RemoteAddr().String(),
+	}).Info("diag-ttrpc-client-connect")
 
 	return nil
 }
@@ -393,6 +419,14 @@ func (v *vmInstance) StartStream(ctx context.Context, streamID string) (net.Conn
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to stream server: %w", err)
 			}
+			// Diag (sandboxes#2529): host-side stream connection accepted by
+			// libkrun proxy and forwarded to guest vsock 1026.
+			log.G(ctx).WithFields(log.Fields{
+				"port":      1026,
+				"stream":    streamID,
+				"remote":    conn.RemoteAddr().String(),
+			}).Info("diag-vsock-stream-accepted")
+			conn = &diagStreamConn{Conn: conn, streamID: streamID, openedAt: time.Now(), ctx: ctx}
 			// Write length-prefixed stream ID
 			idBytes := []byte(streamID)
 			if err := binary.Write(conn, binary.BigEndian, uint32(len(idBytes))); err != nil {
@@ -438,6 +472,13 @@ func (v *vmInstance) Shutdown(ctx context.Context) error {
 	if v.handler == 0 {
 		return fmt.Errorf("libkrun already closed")
 	}
+	// Diag (sandboxes#2529): record exactly when the libkrun-side bridge
+	// (host unix socket -> vsock 1026) is being torn down, with caller stack.
+	log.G(ctx).WithFields(log.Fields{
+		"port":   1026,
+		"reason": "vmInstance.Shutdown",
+		"stack":  string(debug.Stack()),
+	}).Info("diag-vsock-listener-closed")
 	// Stop the VM and wait for all threads (vCPU, virtio workers) to exit
 	// before unloading the library. krun_free_ctx is synchronous: it joins
 	// all threads and closes all file handles. Without this, dlClose rips
@@ -463,4 +504,27 @@ func kernelArch() string {
 	default:
 		return runtime.GOARCH
 	}
+}
+
+// diagStreamConn wraps a net.Conn for the host-side bridge to vsock port 1026.
+// Diag (sandboxes#2529): logs every Close to correlate stream lifetime with
+// the vsock op=Shutdown SHUTDOWN packet emitted by the guest kernel.
+type diagStreamConn struct {
+	net.Conn
+	streamID string
+	openedAt time.Time
+	ctx      context.Context
+	once     sync.Once
+}
+
+func (c *diagStreamConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() {
+		log.G(c.ctx).WithFields(log.Fields{
+			"port":        1026,
+			"stream":      c.streamID,
+			"duration_ms": time.Since(c.openedAt).Milliseconds(),
+		}).Info("diag-vsock-stream-closed")
+	})
+	return err
 }
