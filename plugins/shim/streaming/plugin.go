@@ -83,8 +83,14 @@ func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_Strea
 
 	log.G(ctx).WithField("stream", i.ID).Debug("creating stream bridge")
 
-	// Create a stream connection to the VM, passing through the stream ID
-	vmConn, err := s.sb.StartStream(ctx, i.ID)
+	// Create a stream connection to the VM, passing through the stream ID.
+	// We deliberately decouple vmConn's lifetime from the per-RPC ctx:
+	// closing vmConn is the application-level signal of "stream done", and
+	// firing it on RPC ctx cancellation (e.g. at end-of-exec) propagates a
+	// transport-level shutdown to the VM that on Windows turns into a
+	// vsock SHUTDOWN packet and tears down the entire VM.
+	// See docker/sandboxes#2529 for the empirical evidence chain.
+	vmConn, err := s.sb.StartStream(context.WithoutCancel(ctx), i.ID)
 	if err != nil {
 		return fmt.Errorf("failed to start vm stream: %w", err)
 	}
@@ -135,6 +141,15 @@ func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_Strea
 	// against the server's in-flight reads/writes and could silently
 	// drop data still buffered in the kernel.
 	//
+	// We deliberately wait only on the VM->client direction. Adding a
+	// <-ctx.Done() branch here would let the per-RPC ctx (cancelled
+	// at end-of-exec by ttrpc) trigger the deferred vmConn.Close()
+	// while the VM may still have in-flight data. On Windows that
+	// transport-level close becomes a vsock SHUTDOWN to vminitd which
+	// cascades into Task.Kill -> Delete -> Shutdown, killing the VM.
+	// See docker/sandboxes#2529 for the empirical evidence (across 10
+	// parallel runs: pass = 1 EOF event, fail = 13-30 EOF events).
+	//
 	// We deliberately do not also wait on the client->server
 	// direction: it can stay blocked in srv.Recv() if the client only
 	// issues CloseSend after observing the server's EOF, which itself
@@ -142,12 +157,8 @@ func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_Strea
 	// stream. Waiting would deadlock. Instead the goroutine exits on
 	// its own when ttrpc cancels the stream context on handler
 	// return (or when vmConn.Close unblocks an in-flight write).
-	select {
-	case err := <-v2t:
-		if err != nil && !errors.Is(err, io.EOF) {
-			log.G(ctx).WithError(err).WithField("stream", i.ID).Debug("server->client bridge ended")
-		}
-	case <-ctx.Done():
+	if err := <-v2t; err != nil && !errors.Is(err, io.EOF) {
+		log.G(ctx).WithError(err).WithField("stream", i.ID).Debug("server->client bridge ended")
 	}
 
 	return nil
