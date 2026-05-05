@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -277,6 +278,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *
 	}
 	ns, _ := namespaces.Namespace(ctx)
 	go func(ns string) {
+		// Diagnostic (docker/sandboxes#2529): log uncaught panics in this
+		// long-lived goroutine before the runtime tears down the process,
+		// so we can distinguish "panic" from "external kill" in CI logs.
+		defer func() {
+			if r := recover(); r != nil {
+				log.G(ctx).WithField("stack", string(debug.Stack())).Errorf("shim-panic: vm event stream goroutine panicked: %v", r)
+				panic(r)
+			}
+		}()
 		for {
 			ev, err := sc.Recv()
 			if err != nil {
@@ -687,6 +697,15 @@ func (s *service) send(evt interface{}) {
 }
 
 func (s *service) forward(ctx context.Context, publisher shim.Publisher) {
+	// Diagnostic (docker/sandboxes#2529): log uncaught panics in this
+	// long-lived event forwarder goroutine before the runtime tears the
+	// process down.
+	defer func() {
+		if r := recover(); r != nil {
+			log.G(ctx).WithField("stack", string(debug.Stack())).Errorf("shim-panic: event forward goroutine panicked: %v", r)
+			panic(r)
+		}
+	}()
 	ns, _ := namespaces.Namespace(ctx)
 	ctx = namespaces.WithNamespace(context.Background(), ns)
 	for e := range s.events {
