@@ -21,6 +21,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
 	streamapi "github.com/containerd/containerd/api/services/streaming/v1"
 	ptypes "github.com/containerd/containerd/v2/pkg/protobuf/types"
@@ -67,15 +69,44 @@ func (s *service) RegisterTTRPC(server *ttrpc.Server) error {
 }
 
 func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_StreamServer) error {
+	streamStart := time.Now()
+	var (
+		streamID        string
+		lastRecvErr     error
+		lastRecvErrLock sync.Mutex
+	)
+	setLastRecvErr := func(e error) {
+		if e == nil {
+			return
+		}
+		lastRecvErrLock.Lock()
+		lastRecvErr = e
+		lastRecvErrLock.Unlock()
+		log.G(ctx).WithError(e).WithField("stream", streamID).Info("diag-stream-recv-err")
+	}
+	defer func() {
+		lastRecvErrLock.Lock()
+		lre := lastRecvErr
+		lastRecvErrLock.Unlock()
+		log.G(ctx).WithFields(log.Fields{
+			"stream":        streamID,
+			"lifetime_ms":   time.Since(streamStart).Milliseconds(),
+			"ctx_err":       ctx.Err(),
+			"last_recv_err": lre,
+		}).Info("diag-stream-handler-exit")
+	}()
+
 	// Receive the StreamInit message with the stream ID
 	a, err := srv.Recv()
 	if err != nil {
+		setLastRecvErr(err)
 		return err
 	}
 	var i streamapi.StreamInit
 	if err := typeurl.UnmarshalTo(a, &i); err != nil {
 		return err
 	}
+	streamID = i.ID
 
 	log.G(ctx).WithField("stream", i.ID).Debug("creating stream bridge")
 
@@ -100,7 +131,7 @@ func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_Strea
 
 	// TTRPC -> VM: receive typeurl.Any from containerd, frame and write to VM
 	go func() {
-		err := bridgeTTRPCToVM(srv, vmConn)
+		err := bridgeTTRPCToVM(srv, vmConn, setLastRecvErr)
 		// Send a zero-length frame as an application-level EOF marker
 		// so the VM sees EOF on its reads. We avoid CloseWrite()
 		// because the vsock proxy turns transport-level shutdown into
@@ -141,10 +172,13 @@ func (s *service) Stream(ctx context.Context, srv streamapi.TTRPCStreaming_Strea
 
 // bridgeTTRPCToVM reads typeurl.Any messages from the TTRPC stream and
 // writes them as length-prefixed proto frames to the VM connection.
-func bridgeTTRPCToVM(srv streamapi.TTRPCStreaming_StreamServer, conn io.Writer) error {
+func bridgeTTRPCToVM(srv streamapi.TTRPCStreaming_StreamServer, conn io.Writer, recvErrHook func(error)) error {
 	for {
 		a, err := srv.Recv()
 		if err != nil {
+			if recvErrHook != nil {
+				recvErrHook(err)
+			}
 			return err
 		}
 
